@@ -16,6 +16,7 @@ import kr.dogfoot.hwplib.reader.HWPReader;
 import kr.dogfoot.hwplib.writer.HWPWriter;
 import org.springframework.stereotype.Service;
 
+import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.Map;
 
@@ -78,86 +79,116 @@ public class HwpTemplateService {
     }
 
     private void applyReplacements(Paragraph para, Map<String, ?> data) {
-        if (para == null || para.getText() == null) return;
+        try {
+            if (para == null || para.getText() == null || para.getText().getCharList() == null) return;
 
-        // 현재 텍스트 추출
-        String text = extractText(para);
-        if (text == null || text.isEmpty()) return;
-
-        // 플레이스홀더 치환
-        boolean modified = false;
-        for (Map.Entry<String, ?> e : data.entrySet()) {
-            String placeholder = "${" + e.getKey() + "}";
-            if (text.contains(placeholder)) {
-                text = text.replace(placeholder, e.getValue().toString());
-                modified = true;
+            ArrayList<HWPChar> newCharList = getNewCharList(para.getText().getCharList(), data);
+            if (newCharList != null) {
+                changeNewCharList(para, newCharList);
+                removeLineSeg(para);
+                removeCharShapeExceptFirstOne(para);
             }
-        }
-
-        if (modified) {
-            // 기존 텍스트 클리어
-            if (para.getText().getCharList() != null) {
-                para.getText().getCharList().clear();
-            }
-
-            // 새로운 텍스트 추가
-            String[] lines = text.split("\n", -1);
-            for (int i = 0; i < lines.length; i++) {
-                addTextToParagraph(para, lines[i]);
-
-                // 마지막 줄이 아니면 줄바꿈 추가
-                if (i < lines.length - 1) {
-                    HWPCharControlChar lineBreak = para.getText().addNewCharControlChar();
-                    lineBreak.setCode((short) 10); // 줄바꿈 코드
-                }
-            }
-
-            // 문단 끝 문자 추가 (필요한 경우)
-            ensureParagraphEnd(para);
+        } catch (UnsupportedEncodingException e) {
+            throw new RuntimeException("Text encoding error during replacement", e);
         }
     }
 
-    private String extractText(Paragraph para) {
-        if (para.getText() == null || para.getText().getCharList() == null) {
-            return "";
+    private ArrayList<HWPChar> getNewCharList(ArrayList<HWPChar> oldList, Map<String, ?> data) throws UnsupportedEncodingException {
+        ArrayList<HWPChar> newList = new ArrayList<HWPChar>();
+        ArrayList<HWPChar> listForText = new ArrayList<HWPChar>();
+        boolean hasChanges = false;
+        
+        for (HWPChar ch : oldList) {
+            if (ch.getType() == HWPCharType.Normal) {
+                listForText.add(ch);
+            } else {
+                if (listForText.size() > 0) {
+                    String text = toString(listForText);
+                    listForText.clear();
+                    String newText = changeText(text, data);
+                    
+                    if (newText != null) {
+                        newList.addAll(toHWPCharList(newText));
+                        hasChanges = true;
+                    } else {
+                        newList.addAll(toHWPCharList(text));
+                    }
+                }
+                newList.add(ch);
+            }
         }
 
-        StringBuilder sb = new StringBuilder();
-        for (HWPChar hwpChar : para.getText().getCharList()) {
-            if (hwpChar.getType() == HWPCharType.Normal) {
-                sb.append((char) hwpChar.getCode());
-            } else if (hwpChar.isLineBreak()) {
-                sb.append("\n");
+        if (listForText.size() > 0) {
+            String text = toString(listForText);
+            listForText.clear();
+            String newText = changeText(text, data);
+            
+            if (newText != null) {
+                newList.addAll(toHWPCharList(newText));
+                hasChanges = true;
+            } else {
+                newList.addAll(toHWPCharList(text));
             }
-            // 문단 끝 문자(13)는 무시
+        }
+        
+        return hasChanges ? newList : null;
+    }
+
+    private String toString(ArrayList<HWPChar> listForText) throws UnsupportedEncodingException {
+        StringBuffer sb = new StringBuffer();
+        for (HWPChar ch : listForText) {
+            HWPCharNormal chn = (HWPCharNormal) ch;
+            sb.append((char) chn.getCode());
         }
         return sb.toString();
     }
 
-    private void addTextToParagraph(Paragraph para, String text) {
-        if (text == null || text.isEmpty()) return;
-
-        for (char c : text.toCharArray()) {
-            HWPCharNormal normalChar = para.getText().addNewNormalChar();
-            normalChar.setCode((short) c);
-        }
-    }
-
-    private void ensureParagraphEnd(Paragraph para) {
-        // 문단 끝 문자가 없으면 추가
-        ArrayList<HWPChar> charList = para.getText().getCharList();
-        boolean hasParaBreak = false;
-
-        if (charList != null && !charList.isEmpty()) {
-            HWPChar lastChar = charList.get(charList.size() - 1);
-            if (lastChar.isParaBreak()) {
-                hasParaBreak = true;
+    private String changeText(String text, Map<String, ?> data) {
+        String result = text;
+        boolean modified = false;
+        
+        for (Map.Entry<String, ?> entry : data.entrySet()) {
+            String placeholder = "${" + entry.getKey() + "}";
+            if (result.contains(placeholder)) {
+                result = result.replace(placeholder, entry.getValue().toString());
+                modified = true;
             }
         }
+        
+        return modified ? result : null;
+    }
 
-        if (!hasParaBreak) {
-            HWPCharNormal paraBreak = para.getText().addNewNormalChar();
-            paraBreak.setCode((short) 13); // 문단 끝 코드
+    private ArrayList<HWPChar> toHWPCharList(String text) {
+        ArrayList<HWPChar> list = new ArrayList<HWPChar>();
+        int count = text.length();
+        for (int index = 0; index < count; index++) {
+            HWPCharNormal chn = new HWPCharNormal();
+            chn.setCode((short) text.codePointAt(index));
+            list.add(chn);
+        }
+        return list;
+    }
+
+    private void changeNewCharList(Paragraph paragraph, ArrayList<HWPChar> newCharList) {
+        paragraph.getText().getCharList().clear();
+        for (HWPChar ch : newCharList) {
+            paragraph.getText().getCharList().add(ch);
+        }
+        paragraph.getHeader().setCharacterCount(newCharList.size());
+    }
+
+    private void removeLineSeg(Paragraph paragraph) {
+        paragraph.deleteLineSeg();
+    }
+
+    private void removeCharShapeExceptFirstOne(Paragraph paragraph) {
+        int size = paragraph.getCharShape().getPositonShapeIdPairList().size();
+        if (size > 1) {
+            for (int index = 0; index < size - 1; index++) {
+                paragraph.getCharShape().getPositonShapeIdPairList().remove(1);
+            }
+            paragraph.getHeader().setCharShapeCount(1);
         }
     }
+
 }
